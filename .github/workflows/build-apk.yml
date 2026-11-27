@@ -54,13 +54,37 @@ jobs:
           fi
 
       - name: Restore project signing keystore
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
         run: |
-          if [ ! -f debug.keystore ] && [ -f debug.keystore.base64 ]; then
-            tr -d '\r\n' < debug.keystore.base64 | base64 -d > debug.keystore
+          if [ -n "${DEBUG_KEYSTORE_BASE64}" ]; then
+            printf '%s' "${DEBUG_KEYSTORE_BASE64}" | tr -d '[:space:]' | base64 -d > debug.keystore
+          elif [ ! -f debug.keystore ] && [ -f debug.keystore.base64 ]; then
+            tr -d '[:space:]' < debug.keystore.base64 | base64 -d > debug.keystore
           fi
-          if [ ! -f debug.keystore ]; then
-            echo "::error::debug.keystore could not be restored from debug.keystore.base64"
+
+          if [ ! -s debug.keystore ]; then
+            echo "::error::Signing keystore missing. Add a GitHub Actions secret named DEBUG_KEYSTORE_BASE64 containing the contents of debug.keystore.base64 from AI Studio."
             exit 1
+          fi
+
+          if ! keytool -list -keystore debug.keystore -storepass android > /dev/null 2>&1; then
+            echo "::error::debug.keystore could not be read. Re-copy the full text of debug.keystore.base64 into the DEBUG_KEYSTORE_BASE64 GitHub secret."
+            exit 1
+          fi
+
+      - name: Ensure Firebase config and env defaults
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ ! -f app/google-services.json ] && [ -n "${GOOGLE_SERVICES_JSON}" ]; then
+            printf '%s' "${GOOGLE_SERVICES_JSON}" > app/google-services.json
+          fi
+          if [ ! -f app/google-services.json ]; then
+            echo "::warning::app/google-services.json is missing. Add it to the repo or set the GOOGLE_SERVICES_JSON secret so Firebase and Google Sign-In work."
+          fi
+          if [ ! -f .env.example ]; then
+            touch .env.example
           fi
 
       - name: Extract app version metadata
