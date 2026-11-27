@@ -1,0 +1,877 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net: Deny all reads and writes by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isBootstrapAdmin() {
+      return isSignedIn() &&
+             ('email_verified' in request.auth.token) &&
+             request.auth.token.email_verified == true &&
+             ('email' in request.auth.token) &&
+             request.auth.token.email.lower() == 'chinthawarvinod@gmail.com';
+    }
+
+    function roleDocPath(uid) {
+      return /databases/$(database)/documents/depots/ppio_main/userRoles/$(uid);
+    }
+
+    function userRoleOf(uid) {
+      let p = roleDocPath(uid);
+      return exists(p) ? get(p).data.get('role', 'TECHNICIAN') : 'TECHNICIAN';
+    }
+
+    function userLinkedStaffId(uid) {
+      let p = roleDocPath(uid);
+      return exists(p) ? get(p).data.get('staffId', '') : '';
+    }
+
+    function callerRole() {
+      return !isSignedIn() ? ''
+        : isBootstrapAdmin() ? 'ADMIN'
+        : userRoleOf(request.auth.uid);
+    }
+
+    function isAdmin() {
+      return callerRole() == 'ADMIN';
+    }
+
+    function settingsDocPath() {
+      return /databases/$(database)/documents/depots/ppio_main/settings/config;
+    }
+
+    function defaultMenuAccess(role, menu) {
+      return role == 'ADMIN' ? 'FULL_CONTROL'
+        : (role == 'SUPERVISOR' || role == 'SSE') ? (
+            menu == 'USERS' ? 'NONE'
+            : menu == 'STAFF' ? 'EDIT_WITH_APPROVAL'
+            : 'FULL_CONTROL'
+          )
+        : role == 'JE' ? (
+            menu == 'RAKES' ? 'FULL_CONTROL'
+            : menu in ['SCHEDULE', 'DUTIES', 'LEAVE', 'PERMISSIONS'] ? 'EDIT_WITH_APPROVAL'
+            : menu == 'USERS' ? 'NONE'
+            : 'READ_ONLY'
+          )
+        : role == 'SHIFT_INCHARGE' ? (
+            menu in ['DASHBOARD', 'PERMISSIONS', 'RAKES'] ? 'FULL_CONTROL'
+            : menu == 'DUTIES' ? 'EDIT_WITH_APPROVAL'
+            : menu == 'USERS' ? 'NONE'
+            : 'READ_ONLY'
+          )
+        : role == 'STOREMATE' ? (
+            menu in ['SCHEDULE', 'LEAVE'] ? 'EDIT_WITH_APPROVAL'
+            : menu in ['PERMISSIONS', 'USERS'] ? 'NONE'
+            : 'READ_ONLY'
+          )
+        : (
+            menu == 'LEAVE' ? 'EDIT_WITH_APPROVAL'
+            : menu in ['PERMISSIONS', 'USERS'] ? 'NONE'
+            : 'READ_ONLY'
+          );
+    }
+
+    function settingsMenuOverride(role, menu) {
+      let sp = settingsDocPath();
+      let rma = exists(sp) ? get(sp).data.get('roleMenuAccess', {}) : {};
+      let rm = rma is map ? rma.get(role, {}) : {};
+      return rm is map ? rm.get(menu, '') : '';
+    }
+
+    function resolvedRoleMenuLevel(role, menu) {
+      let override = role == 'ADMIN' ? 'FULL_CONTROL' : settingsMenuOverride(role, menu);
+      return override in ['NONE', 'READ_ONLY', 'EDIT_WITH_APPROVAL', 'FULL_CONTROL']
+        ? override
+        : defaultMenuAccess(role, menu);
+    }
+
+    function callerMenuLevel(menu) {
+      let role = callerRole();
+      return role == '' ? 'NONE' : resolvedRoleMenuLevel(role, menu);
+    }
+
+    function hasFullControl(menu) {
+      return callerMenuLevel(menu) == 'FULL_CONTROL';
+    }
+
+    function hasEditOrFullControl(menu) {
+      return callerMenuLevel(menu) in ['EDIT_WITH_APPROVAL', 'FULL_CONTROL'];
+    }
+
+    function hasAnyAccess(menu) {
+      return callerMenuLevel(menu) in ['READ_ONLY', 'EDIT_WITH_APPROVAL', 'FULL_CONTROL'];
+    }
+
+    function isValidRoleMenuAccess(accessMap) {
+      return accessMap is map &&
+             accessMap.keys().hasOnly(['SUPERVISOR', 'SSE', 'JE', 'SHIFT_INCHARGE', 'STOREMATE', 'TECHNICIAN']);
+    }
+
+    function canUpdateStaffDoc(staffId, diffKeys) {
+      let role = callerRole();
+      return role == 'ADMIN'
+        ? diffKeys.hasOnly(['serialNo', 'name', 'designation', 'competency', 'stationDuty', 'shedDuty', 'weeklyRestDay', 'trainingDueDate', 'trainingCourse', 'phoneNumber', 'secondaryPhoneNumber', 'updatedAt'])
+        : (role != '' && (
+            (diffKeys.hasOnly(['phoneNumber', 'secondaryPhoneNumber', 'updatedAt']) && userLinkedStaffId(request.auth.uid) == staffId) ||
+            (diffKeys.hasOnly(['weeklyRestDay', 'updatedAt']) && resolvedRoleMenuLevel(role, 'LEAVE') == 'FULL_CONTROL') ||
+            (diffKeys.hasOnly(['trainingDueDate', 'trainingCourse', 'updatedAt']) && resolvedRoleMenuLevel(role, 'STAFF') in ['EDIT_WITH_APPROVAL', 'FULL_CONTROL']) ||
+            (diffKeys.hasOnly(['weeklyRestDay', 'trainingDueDate', 'trainingCourse', 'updatedAt']) && resolvedRoleMenuLevel(role, 'LEAVE') == 'FULL_CONTROL' && resolvedRoleMenuLevel(role, 'STAFF') in ['EDIT_WITH_APPROVAL', 'FULL_CONTROL']) ||
+            (diffKeys.hasOnly(['serialNo', 'name', 'designation', 'competency', 'stationDuty', 'shedDuty', 'weeklyRestDay', 'trainingDueDate', 'trainingCourse', 'phoneNumber', 'secondaryPhoneNumber', 'updatedAt']) && resolvedRoleMenuLevel(role, 'STAFF') == 'FULL_CONTROL')
+          ));
+    }
+
+    function canUpdateDutyDraft(diffKeys) {
+      let lvl = callerMenuLevel('SCHEDULE');
+      return (lvl == 'FULL_CONTROL' && diffKeys.hasOnly(['status', 'reviewedByUid', 'reviewedByName', 'reviewNotes', 'proposedSlots', 'updatedAt'])) ||
+             (lvl == 'EDIT_WITH_APPROVAL' &&
+              existing().status == 'PENDING' &&
+              incoming().status == 'PENDING' &&
+              existing().submittedByUid == request.auth.uid &&
+              !isDutyDateLocked(existing().dutyDate) &&
+              diffKeys.hasOnly(['proposedSlots', 'submittedByName', 'updatedAt']));
+    }
+
+    function canDeleteDutyDraft() {
+      let lvl = callerMenuLevel('SCHEDULE');
+      return lvl == 'FULL_CONTROL' ||
+             (lvl == 'EDIT_WITH_APPROVAL' && existing().status == 'PENDING' && existing().submittedByUid == request.auth.uid);
+    }
+
+    function canCreateLeaveDoc() {
+      let lvl = callerMenuLevel('LEAVE');
+      return lvl == 'FULL_CONTROL' ||
+             (lvl == 'EDIT_WITH_APPROVAL' &&
+              incoming().status == 'PENDING' &&
+              incoming().appliedByUid == request.auth.uid &&
+              isForwardedToSseSupervisor(incoming()));
+    }
+
+    function canDeleteLeaveDoc() {
+      let lvl = callerMenuLevel('LEAVE');
+      return lvl == 'FULL_CONTROL' ||
+             (lvl == 'EDIT_WITH_APPROVAL' && existing().status == 'PENDING' && existing().appliedByUid == request.auth.uid);
+    }
+
+    function canManageTargetUserRole(isExistingAdmin, isIncomingAdmin) {
+      let role = callerRole();
+      return role == 'ADMIN' ||
+             (role != '' && !isExistingAdmin && !isIncomingAdmin && resolvedRoleMenuLevel(role, 'USERS') == 'FULL_CONTROL');
+    }
+
+    function canCreateSettings() {
+      let role = callerRole();
+      return role == 'ADMIN' ||
+             (role != '' &&
+              incoming().allowTechnicianShare == true &&
+              !('importantContactsInitialized' in incoming()) &&
+              !('roleMenuAccess' in incoming()) &&
+              (
+                resolvedRoleMenuLevel(role, 'SCHEDULE') == 'FULL_CONTROL' ||
+                resolvedRoleMenuLevel(role, 'DUTIES') == 'FULL_CONTROL' ||
+                (('rakesInitialized' in incoming()) && incoming().rakesInitialized == true && resolvedRoleMenuLevel(role, 'RAKES') in ['EDIT_WITH_APPROVAL', 'FULL_CONTROL'])
+              ));
+    }
+
+    function canUpdateSettings(diffKeys) {
+      let role = callerRole();
+      return (role == 'ADMIN' && diffKeys.hasOnly(['allowTechnicianShare', 'showShunterForTechnicians', 'includeShunterInExport', 'importantContactsInitialized', 'rakesInitialized', 'rakesSchemaVersion', 'roleMenuAccess', 'updatedByUid', 'updatedAt'])) ||
+             (role != '' && diffKeys.hasOnly(['rakesInitialized', 'rakesSchemaVersion', 'updatedByUid', 'updatedAt']) && resolvedRoleMenuLevel(role, 'RAKES') in ['EDIT_WITH_APPROVAL', 'FULL_CONTROL']) ||
+             (role != '' && diffKeys.hasOnly(['showShunterForTechnicians', 'includeShunterInExport', 'rakesInitialized', 'rakesSchemaVersion', 'updatedByUid', 'updatedAt']) &&
+              (resolvedRoleMenuLevel(role, 'SCHEDULE') == 'FULL_CONTROL' || resolvedRoleMenuLevel(role, 'DUTIES') == 'FULL_CONTROL'));
+    }
+
+    function canCreateLeaveAccount(staffId) {
+      let lvl = callerMenuLevel('LEAVE');
+      return lvl == 'FULL_CONTROL' ||
+             (lvl == 'EDIT_WITH_APPROVAL' &&
+              userLinkedStaffId(request.auth.uid) == staffId &&
+              incoming().lapSelfUpdated == true &&
+              incoming().pendingLapStatus == 'NONE' &&
+              incoming().pendingLapRequestedByUid == '' &&
+              incoming().pendingLapReviewedByName == '');
+    }
+
+    function canUpdateLeaveAccount(staffId, diffKeys) {
+      let lvl = callerMenuLevel('LEAVE');
+      return (lvl == 'FULL_CONTROL' &&
+              diffKeys.hasOnly(['staffName', 'baseYear', 'lapOpeningBalance', 'lhapOpeningBalance', 'lapSelfUpdated', 'pendingLapBalance', 'pendingLhapBalance', 'pendingLapYear', 'pendingLapReason', 'pendingLapStatus', 'pendingLapRequestedByUid', 'pendingLapReviewedByName', 'updatedAt'])) ||
+             (lvl == 'EDIT_WITH_APPROVAL' &&
+              userLinkedStaffId(request.auth.uid) == staffId &&
+              (
+                (existing().lapSelfUpdated == false &&
+                 incoming().lapSelfUpdated == true &&
+                 incoming().pendingLapStatus == 'NONE' &&
+                 incoming().pendingLapRequestedByUid == '' &&
+                 diffKeys.hasOnly(['staffName', 'baseYear', 'lapOpeningBalance', 'lhapOpeningBalance', 'lapSelfUpdated', 'pendingLapBalance', 'pendingLhapBalance', 'pendingLapYear', 'pendingLapReason', 'pendingLapStatus', 'pendingLapRequestedByUid', 'pendingLapReviewedByName', 'updatedAt'])) ||
+                (existing().lapSelfUpdated == true &&
+                 incoming().lapOpeningBalance == existing().lapOpeningBalance &&
+                 incoming().lhapOpeningBalance == existing().lhapOpeningBalance &&
+                 incoming().baseYear == existing().baseYear &&
+                 incoming().lapSelfUpdated == true &&
+                 incoming().pendingLapStatus == 'PENDING' &&
+                 incoming().pendingLapRequestedByUid == request.auth.uid &&
+                 incoming().pendingLapReason.size() >= 1 &&
+                 diffKeys.hasOnly(['staffName', 'pendingLapBalance', 'pendingLhapBalance', 'pendingLapYear', 'pendingLapReason', 'pendingLapStatus', 'pendingLapRequestedByUid', 'updatedAt']))
+              ));
+    }
+
+    function canReadImportantContacts() {
+      let role = callerRole();
+      return role == 'ADMIN' ||
+             (role != '' && (resolvedRoleMenuLevel(role, 'PERMISSIONS') != 'NONE' || resolvedRoleMenuLevel(role, 'DASHBOARD') == 'FULL_CONTROL'));
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidDateString(s) {
+      return s is string && s.size() == 10 && s.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
+    }
+
+    function isSharedDepot(depotId) {
+      return depotId == 'ppio_main';
+    }
+
+    function isValidStaffMember(data, depotId) {
+      return data.userId is string && data.userId == depotId &&
+             data.serialNo is int && data.serialNo >= 1 && data.serialNo <= 9999 &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+             data.designation in ['SSE', 'JE', 'SR_TECH', 'TECH_I', 'TECH_II', 'TECH_III', 'KHP', 'SHUNTER'] &&
+             data.competency in ['NONE', 'POINTSMAN'] &&
+             data.stationDuty is bool &&
+             data.shedDuty is bool &&
+             data.weeklyRestDay in ['NONE', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY', 'SUNDAY'] &&
+             (!('trainingDueDate' in data) || data.trainingDueDate == '' || isValidDateString(data.trainingDueDate)) &&
+             (!('trainingCourse' in data) || (data.trainingCourse is string && data.trainingCourse.size() <= 100)) &&
+             (!('phoneNumber' in data) || (data.phoneNumber is string && data.phoneNumber.size() <= 20)) &&
+             (!('secondaryPhoneNumber' in data) || (data.secondaryPhoneNumber is string && data.secondaryPhoneNumber.size() <= 20));
+    }
+
+    function isValidAssignment(data, depotId) {
+      return data.userId is string && data.userId == depotId &&
+             isValidDateString(data.date) &&
+             data.shiftType in ['SHIFT_06_14', 'SHIFT_14_22', 'SHIFT_22_06', 'SHIFT_08_17'] &&
+             data.dutyArea in ['SHED', 'STATION_SC', 'STATION_UR', 'STATION_MED'] &&
+             data.roleType in ['POINTSMAN', 'SHUNTER', 'GENERAL_DUTY'] &&
+             data.slotIndex is int && data.slotIndex >= 0 && data.slotIndex <= 10 &&
+             data.staffId is string && data.staffId.size() >= 1 && data.staffId.size() <= 128 &&
+             data.staffName is string && data.staffName.size() >= 1 && data.staffName.size() <= 100 &&
+             data.isEmergencyOverride is bool &&
+             data.overrideReason is string && data.overrideReason.size() <= 300 &&
+             (!('approvedLocked' in data) || data.approvedLocked is bool) &&
+             (!('approvedByName' in data) || (data.approvedByName is string && data.approvedByName.size() <= 100));
+    }
+
+    function isValidDutyDraft(data, depotId) {
+      return data.depotId is string && data.depotId == depotId &&
+             isValidDateString(data.dutyDate) &&
+             data.status in ['PENDING', 'APPROVED', 'REJECTED'] &&
+             data.submittedByUid is string && data.submittedByUid.size() >= 1 && data.submittedByUid.size() <= 128 &&
+             data.submittedByName is string && data.submittedByName.size() >= 1 && data.submittedByName.size() <= 100 &&
+             data.reviewedByUid is string && data.reviewedByUid.size() <= 128 &&
+             data.reviewedByName is string && data.reviewedByName.size() <= 100 &&
+             data.reviewNotes is string && data.reviewNotes.size() <= 300 &&
+             data.proposedSlots is list && data.proposedSlots.size() >= 1 && data.proposedSlots.size() <= 40 &&
+             data.proposedSlots[0] is map;
+    }
+
+    function isValidDutyLock(data) {
+      return isValidDateString(data.dutyDate) &&
+             data.lockedByUid is string && data.lockedByUid.size() >= 1 && data.lockedByUid.size() <= 128 &&
+             data.lockedByName is string && data.lockedByName.size() >= 1 && data.lockedByName.size() <= 100;
+    }
+
+    function isDutyDateLocked(dutyDate) {
+      return exists(/databases/$(database)/documents/depots/ppio_main/dutyLocks/$(dutyDate));
+    }
+
+    function isValidLeaveRecord(data, depotId) {
+      return data.userId is string && data.userId == depotId &&
+             data.staffId is string && data.staffId.size() >= 1 && data.staffId.size() <= 128 &&
+             data.staffName is string && data.staffName.size() >= 1 && data.staffName.size() <= 100 &&
+             data.leaveType in ['CL', 'LAP', 'LHAP', 'SPECIAL', 'TRAINING', 'EL', 'SICK'] &&
+             isValidDateString(data.startDate) &&
+             isValidDateString(data.endDate) &&
+             data.endDate >= data.startDate &&
+             (!('status' in data) || data.status in ['APPROVED', 'PENDING', 'REJECTED', 'CANCELLED']) &&
+             (!('appliedByUid' in data) || (data.appliedByUid is string && data.appliedByUid.size() <= 128)) &&
+             (!('appliedByName' in data) || (data.appliedByName is string && data.appliedByName.size() <= 100)) &&
+             (!('forwardedToStaffId' in data) || (data.forwardedToStaffId is string && data.forwardedToStaffId.size() <= 128)) &&
+             (!('forwardedToName' in data) || (data.forwardedToName is string && data.forwardedToName.size() <= 100)) &&
+             (!('reviewedByName' in data) || (data.reviewedByName is string && data.reviewedByName.size() <= 100)) &&
+             data.notes is string && data.notes.size() <= 300;
+    }
+
+    function isForwardedToSseSupervisor(data) {
+      return ('forwardedToStaffId' in data) &&
+             isValidId(data.forwardedToStaffId) &&
+             exists(/databases/$(database)/documents/depots/ppio_main/staff/$(data.forwardedToStaffId)) &&
+             get(/databases/$(database)/documents/depots/ppio_main/staff/$(data.forwardedToStaffId)).data.designation == 'SSE';
+    }
+
+    function isValidOverrideLog(data, depotId) {
+      return data.userId is string && data.userId == depotId &&
+             isValidDateString(data.date) &&
+             data.shiftType in ['SHIFT_06_14', 'SHIFT_14_22', 'SHIFT_22_06', 'SHIFT_08_17'] &&
+             data.dutyArea in ['SHED', 'STATION_SC', 'STATION_UR', 'STATION_MED'] &&
+             data.staffId is string && data.staffId.size() >= 1 && data.staffId.size() <= 128 &&
+             data.staffName is string && data.staffName.size() >= 1 && data.staffName.size() <= 100 &&
+             data.conflictSummary is string && data.conflictSummary.size() <= 300 &&
+             data.reason is string && data.reason.size() >= 1 && data.reason.size() <= 300;
+    }
+
+    function isValidEmailKey(emailKey) {
+      return emailKey is string &&
+             emailKey.size() >= 3 &&
+             emailKey.size() <= 200 &&
+             emailKey == emailKey.lower() &&
+             emailKey.matches('^[^/\\s@]+@[^/\\s@]+\\.[^/\\s@]+$');
+    }
+
+    function hasVerifiedAuthEmail() {
+      return isSignedIn() &&
+             ('email_verified' in request.auth.token) &&
+             request.auth.token.email_verified == true &&
+             ('email' in request.auth.token) &&
+             isValidEmailKey(request.auth.token.email.lower());
+    }
+
+    function inviteDocPathForAuthEmail() {
+      return /databases/$(database)/documents/depots/ppio_main/roleInvites/$(request.auth.token.email.lower());
+    }
+
+    function isValidUsernameKey(key) {
+      return key is string &&
+             key.size() >= 3 &&
+             key.size() <= 32 &&
+             key == key.lower() &&
+             key.matches('^[a-z0-9._\\-]+$');
+    }
+
+    function isValidUsernameClaim(data, usernameKey) {
+      return data.username is string && data.username == usernameKey &&
+             data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128;
+    }
+
+    function isValidUserCredential(data, targetUid) {
+      return data.uid is string && data.uid == targetUid &&
+             data.username is string && isValidUsernameKey(data.username) &&
+             data.email is string && data.email.size() >= 3 && data.email.size() <= 200 &&
+             data.passwordSalt is string && data.passwordSalt.size() >= 16 && data.passwordSalt.size() <= 128 &&
+             data.passwordHash is string && data.passwordHash.size() >= 32 && data.passwordHash.size() <= 256;
+    }
+
+    function hasMatchingVerifiedInvite(data) {
+      return hasVerifiedAuthEmail() &&
+             exists(inviteDocPathForAuthEmail()) &&
+             data.role == get(inviteDocPathForAuthEmail()).data.role &&
+             (get(inviteDocPathForAuthEmail()).data.staffId == '' ||
+              data.staffId == get(inviteDocPathForAuthEmail()).data.staffId);
+    }
+
+    function isValidUserRoleProfile(data, targetUid) {
+      return data.uid is string && data.uid == targetUid &&
+             (!('username' in data) || (data.username is string && data.username.size() <= 64)) &&
+             data.email is string && data.email.size() <= 200 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+             data.role in ['ADMIN', 'SUPERVISOR', 'SSE', 'JE', 'SHIFT_INCHARGE', 'STOREMATE', 'TECHNICIAN'] &&
+             data.staffId is string && data.staffId.size() <= 128 &&
+             (!('phoneNumber' in data) || (data.phoneNumber is string && data.phoneNumber.size() <= 20)) &&
+             (!('secondaryPhoneNumber' in data) || (data.secondaryPhoneNumber is string && data.secondaryPhoneNumber.size() <= 20)) &&
+             (!('registered' in data) || data.registered is bool) &&
+             data.updatedByUid is string && data.updatedByUid.size() <= 128;
+    }
+
+    function isValidRoleInvite(data, emailKey) {
+      return data.email is string && data.email == emailKey &&
+             (!('username' in data) || (data.username is string && data.username.size() <= 64)) &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+             data.role in ['ADMIN', 'SUPERVISOR', 'SSE', 'JE', 'SHIFT_INCHARGE', 'STOREMATE', 'TECHNICIAN'] &&
+             data.staffId is string && data.staffId.size() <= 128 &&
+             data.updatedByUid is string && data.updatedByUid.size() >= 1 && data.updatedByUid.size() <= 128;
+    }
+
+    function isValidDepotSettings(data) {
+      return data.allowTechnicianShare is bool &&
+             (!('showShunterForTechnicians' in data) || data.showShunterForTechnicians is bool) &&
+             (!('includeShunterInExport' in data) || data.includeShunterInExport is bool) &&
+             (!('importantContactsInitialized' in data) || data.importantContactsInitialized is bool) &&
+             (!('rakesInitialized' in data) || data.rakesInitialized is bool) &&
+             (!('rakesSchemaVersion' in data) || (data.rakesSchemaVersion is int && data.rakesSchemaVersion >= 0 && data.rakesSchemaVersion <= 100)) &&
+             (!('roleMenuAccess' in data) || isValidRoleMenuAccess(data.roleMenuAccess)) &&
+             data.updatedByUid is string && data.updatedByUid.size() >= 1 && data.updatedByUid.size() <= 128;
+    }
+
+    function isValidLeaveAccount(data, staffId) {
+      return data.staffId is string && data.staffId == staffId &&
+             data.staffName is string && data.staffName.size() >= 1 && data.staffName.size() <= 100 &&
+             data.baseYear is int && data.baseYear >= 2020 && data.baseYear <= 2100 &&
+             data.lapOpeningBalance is int && data.lapOpeningBalance >= 0 && data.lapOpeningBalance <= 999 &&
+             data.lhapOpeningBalance is int && data.lhapOpeningBalance >= 0 && data.lhapOpeningBalance <= 999 &&
+             data.lapSelfUpdated is bool &&
+             data.pendingLapBalance is int && data.pendingLapBalance >= 0 && data.pendingLapBalance <= 999 &&
+             (!('pendingLhapBalance' in data) || (data.pendingLhapBalance is int && data.pendingLhapBalance >= 0 && data.pendingLhapBalance <= 999)) &&
+             data.pendingLapYear is int && (data.pendingLapYear == 0 || (data.pendingLapYear >= 2020 && data.pendingLapYear <= 2100)) &&
+             data.pendingLapReason is string && data.pendingLapReason.size() <= 300 &&
+             data.pendingLapStatus in ['NONE', 'PENDING', 'APPROVED', 'REJECTED'] &&
+             data.pendingLapRequestedByUid is string && data.pendingLapRequestedByUid.size() <= 128 &&
+             data.pendingLapReviewedByName is string && data.pendingLapReviewedByName.size() <= 100;
+    }
+
+    function isValidDutyPermission(data, depotId) {
+      return data.userId is string && data.userId == depotId &&
+             data.staffId is string && data.staffId.size() >= 1 && data.staffId.size() <= 128 &&
+             data.staffName is string && data.staffName.size() >= 1 && data.staffName.size() <= 100 &&
+             isValidDateString(data.date) &&
+             data.shiftType in ['SHIFT_06_14', 'SHIFT_14_22', 'SHIFT_22_06', 'SHIFT_08_17'] &&
+             data.hours is number && data.hours > 0 && data.hours <= 12 &&
+             data.reliefType in ['EARLY_RELIEF', 'LATE_REPORTING', 'MID_SHIFT'] &&
+             data.reason is string && data.reason.size() <= 300 &&
+             data.grantedByUid is string && data.grantedByUid.size() >= 1 && data.grantedByUid.size() <= 128 &&
+             data.grantedByName is string && data.grantedByName.size() >= 1 && data.grantedByName.size() <= 100;
+    }
+
+    function isValidImportantContact(data, depotId) {
+      return data.userId is string && data.userId == depotId &&
+             data.label is string && data.label.size() >= 1 && data.label.size() <= 80 &&
+             data.phoneNumber is string && data.phoneNumber.size() >= 3 && data.phoneNumber.size() <= 20 &&
+             data.category is string && data.category.size() <= 40 &&
+             data.sortOrder is int && data.sortOrder >= 0 && data.sortOrder <= 999999;
+    }
+
+    function isValidRakeFormation(data, depotId) {
+      return data.userId is string && data.userId == depotId &&
+             data.rakeName is string && data.rakeName.size() >= 1 && data.rakeName.size() <= 80 &&
+             data.category in ['EMU_3PHASE_12CAR', 'EMU_CONV_9CAR', 'MEMU_3PHASE_12CAR', 'MEMU_BHEL', 'VANDE_BHARAT', 'SPARE_UNIT'] &&
+             data.make is string && data.make.size() <= 30 &&
+             data.tcasFitted is bool &&
+             data.startEnd is string && data.startEnd.size() <= 20 &&
+             data.finishEnd is string && data.finishEnd.size() <= 20 &&
+             data.remarks is string && data.remarks.size() <= 300 &&
+             data.sortOrder is int && data.sortOrder >= 0 && data.sortOrder <= 999999 &&
+             data.coaches is list && data.coaches.size() >= 1 && data.coaches.size() <= 24 &&
+             data.coaches[0] is map &&
+             data.updatedByUid is string && data.updatedByUid.size() <= 128 &&
+             data.updatedByName is string && data.updatedByName.size() <= 100;
+    }
+
+    function isValidAppReleaseConfig(data) {
+      return data.latestVersionCode is int && data.latestVersionCode >= 0 && data.latestVersionCode <= 999999 &&
+             data.latestVersionName is string && data.latestVersionName.size() <= 40 &&
+             data.minSupportedVersionCode is int && data.minSupportedVersionCode >= 0 && data.minSupportedVersionCode <= data.latestVersionCode &&
+             data.mandatory is bool &&
+             data.downloadUrl is string && data.downloadUrl.size() <= 500 &&
+             ((data.latestVersionCode == 0 && data.downloadUrl == '' && data.latestVersionName == '' && data.mandatory == false) ||
+              (data.latestVersionCode >= 1 && data.latestVersionName.size() >= 1 && data.downloadUrl.matches('^https://[^/\\s]+\\.[^\\s]+$'))) &&
+             data.releaseNotes is string && data.releaseNotes.size() <= 1500 &&
+             data.sha256Checksum is string && (data.sha256Checksum == '' || data.sha256Checksum.matches('^[0-9a-fA-F]{64}$')) &&
+             data.publishedByUid is string && data.publishedByUid.size() >= 1 && data.publishedByUid.size() <= 128 &&
+             data.publishedByName is string && data.publishedByName.size() >= 1 && data.publishedByName.size() <= 100;
+    }
+
+    match /depots/{depotId} {
+      match /staff/{staffId} {
+        allow list: if isSignedIn() && isSharedDepot(depotId);
+        allow get: if isSignedIn() && isSharedDepot(depotId) && isValidId(staffId);
+        allow delete: if hasFullControl('STAFF') && isSharedDepot(depotId) && isValidId(staffId);
+        allow create: if hasFullControl('STAFF') &&
+                         isSharedDepot(depotId) &&
+                         isValidId(staffId) &&
+                         incoming().keys().hasAll(['userId', 'serialNo', 'name', 'designation', 'competency', 'stationDuty', 'shedDuty', 'weeklyRestDay', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'serialNo', 'name', 'designation', 'competency', 'stationDuty', 'shedDuty', 'weeklyRestDay', 'trainingDueDate', 'trainingCourse', 'phoneNumber', 'secondaryPhoneNumber', 'createdAt', 'updatedAt']) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         isValidStaffMember(incoming(), depotId);
+        allow update: if isSharedDepot(depotId) &&
+                         isValidId(staffId) &&
+                         isValidStaffMember(incoming(), depotId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         canUpdateStaffDoc(staffId, incoming().diff(existing()).affectedKeys());
+      }
+
+      match /assignments/{assignmentId} {
+        allow list: if isSignedIn() && isSharedDepot(depotId);
+        allow get: if isSignedIn() && isSharedDepot(depotId) && isValidId(assignmentId);
+        allow delete: if hasFullControl('SCHEDULE') && isSharedDepot(depotId) && isValidId(assignmentId);
+        allow create: if hasFullControl('SCHEDULE') &&
+                         isSharedDepot(depotId) &&
+                         isValidId(assignmentId) &&
+                         incoming().keys().hasAll(['userId', 'date', 'shiftType', 'dutyArea', 'roleType', 'slotIndex', 'staffId', 'staffName', 'isEmergencyOverride', 'overrideReason', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'date', 'shiftType', 'dutyArea', 'roleType', 'slotIndex', 'staffId', 'staffName', 'isEmergencyOverride', 'overrideReason', 'approvedLocked', 'approvedByName', 'createdAt', 'updatedAt']) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         isValidAssignment(incoming(), depotId);
+        allow update: if hasFullControl('SCHEDULE') &&
+                         isSharedDepot(depotId) &&
+                         isValidId(assignmentId) &&
+                         isValidAssignment(incoming(), depotId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['date', 'shiftType', 'dutyArea', 'roleType', 'slotIndex', 'staffId', 'staffName', 'isEmergencyOverride', 'overrideReason', 'approvedLocked', 'approvedByName', 'updatedAt']);
+      }
+
+      match /dutyDrafts/{draftId} {
+        allow list: if isSignedIn() && isSharedDepot(depotId);
+        allow get: if isSignedIn() && isSharedDepot(depotId) && isValidId(draftId);
+        allow create: if hasEditOrFullControl('SCHEDULE') &&
+                         isSharedDepot(depotId) &&
+                         isValidId(draftId) &&
+                         incoming().keys().hasAll(['depotId', 'dutyDate', 'status', 'submittedByUid', 'submittedByName', 'reviewedByUid', 'reviewedByName', 'reviewNotes', 'proposedSlots', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['depotId', 'dutyDate', 'status', 'submittedByUid', 'submittedByName', 'reviewedByUid', 'reviewedByName', 'reviewNotes', 'proposedSlots', 'createdAt', 'updatedAt']) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         isValidDutyDraft(incoming(), depotId) &&
+                         incoming().status == 'PENDING' &&
+                         incoming().submittedByUid == request.auth.uid &&
+                         !isDutyDateLocked(incoming().dutyDate);
+        allow update: if isSharedDepot(depotId) &&
+                         isValidId(draftId) &&
+                         isValidDutyDraft(incoming(), depotId) &&
+                         incoming().depotId == existing().depotId &&
+                         incoming().dutyDate == existing().dutyDate &&
+                         incoming().submittedByUid == existing().submittedByUid &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         canUpdateDutyDraft(incoming().diff(existing()).affectedKeys());
+        allow delete: if isSharedDepot(depotId) &&
+                         isValidId(draftId) &&
+                         canDeleteDutyDraft();
+      }
+
+      match /dutyLocks/{dutyDate} {
+        allow list: if isSignedIn() && isSharedDepot(depotId);
+        allow get: if isSignedIn() && isSharedDepot(depotId) && isValidDateString(dutyDate);
+        allow delete: if hasFullControl('SCHEDULE') && isSharedDepot(depotId) && isValidDateString(dutyDate);
+        allow create: if hasFullControl('SCHEDULE') &&
+                         isSharedDepot(depotId) &&
+                         isValidDateString(dutyDate) &&
+                         incoming().dutyDate == dutyDate &&
+                         incoming().keys().hasAll(['dutyDate', 'lockedByUid', 'lockedByName', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['dutyDate', 'lockedByUid', 'lockedByName', 'createdAt', 'updatedAt']) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         isValidDutyLock(incoming());
+        allow update: if hasFullControl('SCHEDULE') &&
+                         isSharedDepot(depotId) &&
+                         isValidDateString(dutyDate) &&
+                         isValidDutyLock(incoming()) &&
+                         incoming().dutyDate == existing().dutyDate &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['lockedByUid', 'lockedByName', 'updatedAt']);
+      }
+
+      match /leaves/{leaveId} {
+        allow list: if isSignedIn() && isSharedDepot(depotId);
+        allow get: if isSignedIn() && isSharedDepot(depotId) && isValidId(leaveId);
+        allow delete: if isSharedDepot(depotId) &&
+                         isValidId(leaveId) &&
+                         canDeleteLeaveDoc();
+        allow create: if isSignedIn() &&
+                         isSharedDepot(depotId) &&
+                         isValidId(leaveId) &&
+                         incoming().keys().hasAll(['userId', 'staffId', 'staffName', 'leaveType', 'startDate', 'endDate', 'notes', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'staffId', 'staffName', 'leaveType', 'startDate', 'endDate', 'status', 'appliedByUid', 'appliedByName', 'forwardedToStaffId', 'forwardedToName', 'reviewedByName', 'notes', 'createdAt', 'updatedAt']) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         isValidLeaveRecord(incoming(), depotId) &&
+                         canCreateLeaveDoc();
+        allow update: if hasFullControl('LEAVE') &&
+                         isSharedDepot(depotId) &&
+                         isValidId(leaveId) &&
+                         isValidLeaveRecord(incoming(), depotId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['staffId', 'staffName', 'leaveType', 'startDate', 'endDate', 'status', 'forwardedToStaffId', 'forwardedToName', 'reviewedByName', 'notes', 'updatedAt']);
+      }
+
+      match /overrides/{overrideId} {
+        allow list: if isSignedIn() && isSharedDepot(depotId);
+        allow get: if isSignedIn() && isSharedDepot(depotId) && isValidId(overrideId);
+        allow create: if hasFullControl('SCHEDULE') &&
+                         isSharedDepot(depotId) &&
+                         isValidId(overrideId) &&
+                         incoming().keys().hasAll(['userId', 'date', 'shiftType', 'dutyArea', 'staffId', 'staffName', 'conflictSummary', 'reason', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'date', 'shiftType', 'dutyArea', 'staffId', 'staffName', 'conflictSummary', 'reason', 'createdAt', 'updatedAt']) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         isValidOverrideLog(incoming(), depotId);
+        allow update, delete: if false;
+      }
+
+      match /userRoles/{targetUid} {
+        // Strict PII Isolation: email and phone numbers are inside userRoles, so only owner, Admin, or Admin-authorized Users-menu roles may read
+        allow get: if isSignedIn() && isSharedDepot(depotId) && isValidId(targetUid) && (request.auth.uid == targetUid || hasAnyAccess('USERS'));
+        allow list: if isSignedIn() && isSharedDepot(depotId) && hasAnyAccess('USERS');
+        allow delete: if isSharedDepot(depotId) && isValidId(targetUid) && targetUid != request.auth.uid &&
+                         canManageTargetUserRole(existing().role == 'ADMIN', false);
+        allow create: if isSignedIn() &&
+                         isSharedDepot(depotId) &&
+                         isValidId(targetUid) &&
+                         incoming().keys().hasAll(['uid', 'email', 'displayName', 'role', 'staffId', 'updatedByUid', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['uid', 'username', 'email', 'displayName', 'role', 'staffId', 'phoneNumber', 'secondaryPhoneNumber', 'registered', 'updatedByUid', 'createdAt', 'updatedAt']) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         isValidUserRoleProfile(incoming(), targetUid) &&
+                         (
+                           canManageTargetUserRole(false, incoming().role == 'ADMIN') ||
+                           (request.auth.uid == targetUid &&
+                             ((isBootstrapAdmin() && incoming().role == 'ADMIN') ||
+                              hasMatchingVerifiedInvite(incoming()) ||
+                              incoming().role == 'TECHNICIAN'))
+                         );
+        allow update: if isSignedIn() &&
+                         isSharedDepot(depotId) &&
+                         isValidId(targetUid) &&
+                         isValidUserRoleProfile(incoming(), targetUid) &&
+                         incoming().uid == existing().uid &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         (
+                           (incoming().diff(existing()).affectedKeys().hasOnly(['role', 'staffId', 'displayName', 'username', 'email', 'phoneNumber', 'secondaryPhoneNumber', 'registered', 'updatedByUid', 'updatedAt']) &&
+                             canManageTargetUserRole(existing().role == 'ADMIN', incoming().role == 'ADMIN')) ||
+                           (request.auth.uid == targetUid &&
+                             (!('registered' in existing()) || existing().registered == false) &&
+                             ((incoming().role == existing().role) ||
+                              (isBootstrapAdmin() && incoming().role == 'ADMIN') ||
+                              hasMatchingVerifiedInvite(incoming())) &&
+                             incoming().diff(existing()).affectedKeys().hasOnly(['role', 'staffId', 'displayName', 'username', 'email', 'phoneNumber', 'secondaryPhoneNumber', 'registered', 'updatedAt'])) ||
+                           (request.auth.uid == targetUid &&
+                             hasMatchingVerifiedInvite(incoming()) &&
+                             incoming().diff(existing()).affectedKeys().hasOnly(['role', 'staffId', 'displayName', 'username', 'email', 'updatedAt'])) ||
+                           (request.auth.uid == targetUid &&
+                             incoming().role == existing().role &&
+                             incoming().staffId == existing().staffId &&
+                             incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'phoneNumber', 'secondaryPhoneNumber', 'updatedAt']))
+                         );
+      }
+
+      match /usernames/{usernameKey} {
+        // Global online username reservation registry: prevents duplicate usernames while disallowing enumeration
+        allow list: if false;
+        allow get: if isSignedIn() && isSharedDepot(depotId) && isValidUsernameKey(usernameKey);
+        allow create: if isSignedIn() &&
+                         isSharedDepot(depotId) &&
+                         isValidUsernameKey(usernameKey) &&
+                         incoming().keys().hasAll(['username', 'uid', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['username', 'uid', 'createdAt', 'updatedAt']) &&
+                         incoming().uid == request.auth.uid &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         isValidUsernameClaim(incoming(), usernameKey);
+        allow update: if false;
+        allow delete: if isSharedDepot(depotId) &&
+                         isValidUsernameKey(usernameKey) &&
+                         (isAdmin() || (isSignedIn() && existing().uid == request.auth.uid));
+      }
+
+      match /userCredentials/{targetUid} {
+        // Strict owner-only isolation for salted PBKDF2 password hashes (even Admin cannot read or alter another user's password hash)
+        allow list: if false;
+        allow get: if isSignedIn() && isSharedDepot(depotId) && isValidId(targetUid) && request.auth.uid == targetUid;
+        allow create: if isSignedIn() &&
+                         isSharedDepot(depotId) &&
+                         isValidId(targetUid) &&
+                         request.auth.uid == targetUid &&
+                         incoming().keys().hasAll(['uid', 'username', 'email', 'passwordSalt', 'passwordHash', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['uid', 'username', 'email', 'passwordSalt', 'passwordHash', 'createdAt', 'updatedAt']) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         isValidUserCredential(incoming(), targetUid);
+        allow update: if isSignedIn() &&
+                         isSharedDepot(depotId) &&
+                         isValidId(targetUid) &&
+                         request.auth.uid == targetUid &&
+                         isValidUserCredential(incoming(), targetUid) &&
+                         incoming().uid == existing().uid &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['username', 'email', 'passwordSalt', 'passwordHash', 'updatedAt']);
+        allow delete: if isSharedDepot(depotId) &&
+                         isValidId(targetUid) &&
+                         (isAdmin() || (isSignedIn() && request.auth.uid == targetUid));
+      }
+
+      match /roleInvites/{emailKey} {
+        // Strict PII Isolation: only Admin or Admin-authorized Users-menu roles can list/manage invites; signed-in user may only get their own verified email's invite
+        allow list: if hasAnyAccess('USERS') && isSharedDepot(depotId);
+        allow get: if isSignedIn() &&
+                      isSharedDepot(depotId) &&
+                      isValidEmailKey(emailKey) &&
+                      ((hasVerifiedAuthEmail() && request.auth.token.email.lower() == emailKey) || hasAnyAccess('USERS'));
+        allow delete: if isSharedDepot(depotId) && isValidEmailKey(emailKey) &&
+                         canManageTargetUserRole(existing().role == 'ADMIN', false);
+        allow create: if isSharedDepot(depotId) &&
+                         isValidEmailKey(emailKey) &&
+                         canManageTargetUserRole(false, incoming().role == 'ADMIN') &&
+                         incoming().keys().hasAll(['email', 'displayName', 'role', 'staffId', 'updatedByUid', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['email', 'username', 'displayName', 'role', 'staffId', 'updatedByUid', 'createdAt', 'updatedAt']) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         isValidRoleInvite(incoming(), emailKey);
+        allow update: if isSharedDepot(depotId) &&
+                         isValidEmailKey(emailKey) &&
+                         canManageTargetUserRole(existing().role == 'ADMIN', incoming().role == 'ADMIN') &&
+                         isValidRoleInvite(incoming(), emailKey) &&
+                         incoming().email == existing().email &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['role', 'staffId', 'displayName', 'username', 'updatedByUid', 'updatedAt']);
+      }
+
+      match /settings/{settingId} {
+        allow get: if isSignedIn() && isSharedDepot(depotId) && settingId == 'config';
+        allow list: if false;
+        allow delete: if false;
+        allow create: if isSharedDepot(depotId) &&
+                         settingId == 'config' &&
+                         incoming().keys().hasAll(['allowTechnicianShare', 'updatedByUid', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['allowTechnicianShare', 'showShunterForTechnicians', 'includeShunterInExport', 'importantContactsInitialized', 'rakesInitialized', 'rakesSchemaVersion', 'roleMenuAccess', 'updatedByUid', 'createdAt', 'updatedAt']) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         isValidDepotSettings(incoming()) &&
+                         canCreateSettings();
+        allow update: if isSharedDepot(depotId) &&
+                         settingId == 'config' &&
+                         isValidDepotSettings(incoming()) &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         canUpdateSettings(incoming().diff(existing()).affectedKeys());
+      }
+
+      match /leaveAccounts/{staffId} {
+        allow list: if isSignedIn() && isSharedDepot(depotId);
+        allow get: if isSignedIn() && isSharedDepot(depotId) && isValidId(staffId);
+        allow delete: if false;
+        allow create: if isSignedIn() &&
+                         isSharedDepot(depotId) &&
+                         isValidId(staffId) &&
+                         incoming().keys().hasAll(['staffId', 'staffName', 'baseYear', 'lapOpeningBalance', 'lhapOpeningBalance', 'lapSelfUpdated', 'pendingLapBalance', 'pendingLapYear', 'pendingLapReason', 'pendingLapStatus', 'pendingLapRequestedByUid', 'pendingLapReviewedByName', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['staffId', 'staffName', 'baseYear', 'lapOpeningBalance', 'lhapOpeningBalance', 'lapSelfUpdated', 'pendingLapBalance', 'pendingLhapBalance', 'pendingLapYear', 'pendingLapReason', 'pendingLapStatus', 'pendingLapRequestedByUid', 'pendingLapReviewedByName', 'createdAt', 'updatedAt']) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         isValidLeaveAccount(incoming(), staffId) &&
+                         canCreateLeaveAccount(staffId);
+        allow update: if isSignedIn() &&
+                         isSharedDepot(depotId) &&
+                         isValidId(staffId) &&
+                         isValidLeaveAccount(incoming(), staffId) &&
+                         incoming().staffId == existing().staffId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         canUpdateLeaveAccount(staffId, incoming().diff(existing()).affectedKeys());
+      }
+
+      match /dutyPermissions/{permissionId} {
+        // Strictly governed by PERMISSIONS menu access level
+        allow list: if hasAnyAccess('PERMISSIONS') && isSharedDepot(depotId);
+        allow get: if hasAnyAccess('PERMISSIONS') && isSharedDepot(depotId) && isValidId(permissionId);
+        allow delete: if hasFullControl('PERMISSIONS') && isSharedDepot(depotId) && isValidId(permissionId);
+        allow create: if hasEditOrFullControl('PERMISSIONS') &&
+                         isSharedDepot(depotId) &&
+                         isValidId(permissionId) &&
+                         incoming().keys().hasAll(['userId', 'staffId', 'staffName', 'date', 'shiftType', 'hours', 'reliefType', 'reason', 'grantedByUid', 'grantedByName', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'staffId', 'staffName', 'date', 'shiftType', 'hours', 'reliefType', 'reason', 'grantedByUid', 'grantedByName', 'createdAt', 'updatedAt']) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         isValidDutyPermission(incoming(), depotId);
+        allow update: if hasEditOrFullControl('PERMISSIONS') &&
+                         isSharedDepot(depotId) &&
+                         isValidId(permissionId) &&
+                         isValidDutyPermission(incoming(), depotId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['staffId', 'staffName', 'date', 'shiftType', 'hours', 'reliefType', 'reason', 'grantedByUid', 'grantedByName', 'updatedAt']);
+      }
+
+      match /importantContacts/{contactId} {
+        // Visible to roles with PERMISSIONS access or Full Control Dashboard; ONLY Admin can add, edit, or delete
+        allow list: if canReadImportantContacts() && isSharedDepot(depotId);
+        allow get: if canReadImportantContacts() && isSharedDepot(depotId) && isValidId(contactId);
+        allow delete: if isAdmin() && isSharedDepot(depotId) && isValidId(contactId);
+        allow create: if isAdmin() &&
+                         isSharedDepot(depotId) &&
+                         isValidId(contactId) &&
+                         incoming().keys().hasAll(['userId', 'label', 'phoneNumber', 'category', 'sortOrder', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'label', 'phoneNumber', 'category', 'sortOrder', 'createdAt', 'updatedAt']) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         isValidImportantContact(incoming(), depotId);
+        allow update: if isAdmin() &&
+                         isSharedDepot(depotId) &&
+                         isValidId(contactId) &&
+                         isValidImportantContact(incoming(), depotId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['label', 'phoneNumber', 'category', 'sortOrder', 'updatedAt']);
+      }
+
+      match /rakes/{rakeId} {
+        // Viewable by signed-in depot staff; Create/Edit governed by RAKES edit/full control; Delete governed by RAKES full control
+        allow list: if isSignedIn() && isSharedDepot(depotId);
+        allow get: if isSignedIn() && isSharedDepot(depotId) && isValidId(rakeId);
+        allow delete: if hasFullControl('RAKES') && isSharedDepot(depotId) && isValidId(rakeId);
+        allow create: if hasEditOrFullControl('RAKES') &&
+                         isSharedDepot(depotId) &&
+                         isValidId(rakeId) &&
+                         incoming().keys().hasAll(['userId', 'rakeName', 'category', 'make', 'tcasFitted', 'startEnd', 'finishEnd', 'remarks', 'sortOrder', 'coaches', 'updatedByUid', 'updatedByName', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'rakeName', 'category', 'make', 'tcasFitted', 'startEnd', 'finishEnd', 'remarks', 'sortOrder', 'coaches', 'updatedByUid', 'updatedByName', 'createdAt', 'updatedAt']) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         isValidRakeFormation(incoming(), depotId);
+        allow update: if hasEditOrFullControl('RAKES') &&
+                         isSharedDepot(depotId) &&
+                         isValidId(rakeId) &&
+                         isValidRakeFormation(incoming(), depotId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['rakeName', 'category', 'make', 'tcasFitted', 'startEnd', 'finishEnd', 'remarks', 'sortOrder', 'coaches', 'updatedByUid', 'updatedByName', 'updatedAt']);
+      }
+
+      match /appRelease/{releaseId} {
+        // Readable by all signed-in depot users for real-time OTA update checks; writable ONLY by Admin with strict HTTPS validation
+        allow get: if isSignedIn() && isSharedDepot(depotId) && releaseId == 'latest';
+        allow list: if false;
+        allow delete: if false;
+        allow create: if isAdmin() &&
+                         isSharedDepot(depotId) &&
+                         releaseId == 'latest' &&
+                         incoming().keys().hasAll(['latestVersionCode', 'latestVersionName', 'minSupportedVersionCode', 'mandatory', 'downloadUrl', 'releaseNotes', 'sha256Checksum', 'publishedByUid', 'publishedByName', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['latestVersionCode', 'latestVersionName', 'minSupportedVersionCode', 'mandatory', 'downloadUrl', 'releaseNotes', 'sha256Checksum', 'publishedByUid', 'publishedByName', 'createdAt', 'updatedAt']) &&
+                         incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         isValidAppReleaseConfig(incoming());
+        allow update: if isAdmin() &&
+                         isSharedDepot(depotId) &&
+                         releaseId == 'latest' &&
+                         isValidAppReleaseConfig(incoming()) &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['latestVersionCode', 'latestVersionName', 'minSupportedVersionCode', 'mandatory', 'downloadUrl', 'releaseNotes', 'sha256Checksum', 'publishedByUid', 'publishedByName', 'updatedAt']);
+      }
+    }
+  }
+}

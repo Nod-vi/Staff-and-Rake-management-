@@ -1,0 +1,6 @@
+{
+  "name": "PPIO Roster",
+  "description": "Train set maintenance depot 3-shift staff scheduler with competency isolation, mandatory rest and leave enforcement, manager dashboard, and Gemini AI operations assistant.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

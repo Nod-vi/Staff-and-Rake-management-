@@ -1,0 +1,425 @@
+{
+  "entities": {
+    "StaffMember": {
+      "title": "StaffMember",
+      "description": "Shared PPIO depot staff member with designation, competency, duty qualifications, and weekly rest day",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Depot workspace ID (ppio_main)" },
+        "serialNo": { "type": "integer", "description": "Staff serial number from PPIO sheet" },
+        "name": { "type": "string", "description": "Full staff name" },
+        "designation": {
+          "type": "string",
+          "enum": ["SSE", "JE", "SR_TECH", "TECH_I", "TECH_II", "TECH_III", "KHP", "SHUNTER"],
+          "description": "Railway depot designation"
+        },
+        "competency": {
+          "type": "string",
+          "enum": ["NONE", "POINTSMAN"],
+          "description": "Special certification; POINTSMAN restricts assignment to Pointsman role slots"
+        },
+        "stationDuty": { "type": "boolean", "description": "Qualified for Station duty (SC/UR/MED)" },
+        "shedDuty": { "type": "boolean", "description": "Qualified for Shed duty" },
+        "weeklyRestDay": {
+          "type": "string",
+          "enum": ["NONE", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"],
+          "description": "Mandatory weekly rest day"
+        },
+        "trainingDueDate": { "type": "string", "description": "Optional ISO date YYYY-MM-DD when periodic technical training is due (empty string when none)" },
+        "trainingCourse": { "type": "string", "description": "Optional technical training course or module name" },
+        "phoneNumber": { "type": "string", "description": "Optional primary contact phone number for staff calling & messaging" },
+        "secondaryPhoneNumber": { "type": "string", "description": "Optional alternate/secondary contact phone number for staff calling & messaging" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update" }
+      },
+      "required": ["userId", "serialNo", "name", "designation", "competency", "stationDuty", "shedDuty", "weeklyRestDay", "createdAt", "updatedAt"]
+    },
+    "ShiftSlotAssignment": {
+      "title": "ShiftSlotAssignment",
+      "description": "Approved and published personnel assignment for a specific date, shift, duty area, and slot index",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Depot workspace ID (ppio_main)" },
+        "date": { "type": "string", "description": "ISO local date YYYY-MM-DD" },
+        "shiftType": {
+          "type": "string",
+          "enum": ["SHIFT_06_14", "SHIFT_14_22", "SHIFT_22_06", "SHIFT_08_17"],
+          "description": "Shift window"
+        },
+        "dutyArea": {
+          "type": "string",
+          "enum": ["SHED", "STATION_SC", "STATION_UR", "STATION_MED"],
+          "description": "Depot duty location"
+        },
+        "roleType": {
+          "type": "string",
+          "enum": ["POINTSMAN", "GENERAL_DUTY"],
+          "description": "Slot competency role requirement"
+        },
+        "slotIndex": { "type": "integer", "description": "Zero-based slot index within the duty area" },
+        "staffId": { "type": "string", "description": "Assigned StaffMember document ID" },
+        "staffName": { "type": "string", "description": "Assigned staff member display name" },
+        "isEmergencyOverride": { "type": "boolean", "description": "Whether supervisor bypassed a conflict rule" },
+        "overrideReason": { "type": "string", "description": "Justification when isEmergencyOverride is true" },
+        "approvedLocked": { "type": "boolean", "description": "True once saved/approved by Supervisor so Storemate cannot alter" },
+        "approvedByName": { "type": "string", "description": "Supervisor who approved or published the assignment" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update" }
+      },
+      "required": ["userId", "date", "shiftType", "dutyArea", "roleType", "slotIndex", "staffId", "staffName", "isEmergencyOverride", "overrideReason", "createdAt", "updatedAt"]
+    },
+    "DutyApprovalRequest": {
+      "title": "DutyApprovalRequest",
+      "description": "Storemate shift duty draft submitted for Supervisor approval before updating shared assignments",
+      "type": "object",
+      "properties": {
+        "depotId": { "type": "string", "description": "Shared depot ID (ppio_main)" },
+        "dutyDate": { "type": "string", "description": "Operational duty date YYYY-MM-DD" },
+        "status": {
+          "type": "string",
+          "enum": ["PENDING", "APPROVED", "REJECTED"],
+          "description": "Approval workflow state"
+        },
+        "submittedByUid": { "type": "string", "description": "Storemate Firebase UID" },
+        "submittedByName": { "type": "string", "description": "Storemate display name" },
+        "reviewedByUid": { "type": "string", "description": "Approving/rejecting Supervisor UID" },
+        "reviewedByName": { "type": "string", "description": "Approving/rejecting Supervisor name" },
+        "reviewNotes": { "type": "string", "description": "Optional supervisor remarks" },
+        "proposedSlots": { "type": "array", "description": "Proposed duty cycle slot assignments (1..40)" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["depotId", "dutyDate", "status", "submittedByUid", "submittedByName", "reviewedByUid", "reviewedByName", "reviewNotes", "proposedSlots", "createdAt", "updatedAt"]
+    },
+    "DutyDateLock": {
+      "title": "DutyDateLock",
+      "description": "Lock marker indicating a duty date has been approved by Supervisor and cannot be altered by Storemate",
+      "type": "object",
+      "properties": {
+        "dutyDate": { "type": "string", "description": "Approved duty date YYYY-MM-DD" },
+        "lockedByUid": { "type": "string", "description": "Supervisor UID" },
+        "lockedByName": { "type": "string", "description": "Supervisor display name" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["dutyDate", "lockedByUid", "lockedByName", "createdAt", "updatedAt"]
+    },
+    "LeaveRecord": {
+      "title": "LeaveRecord",
+      "description": "Shared leave request/approval record; APPROVED excludes staff from shift availability",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Depot workspace ID (ppio_main)" },
+        "staffId": { "type": "string", "description": "StaffMember document ID" },
+        "staffName": { "type": "string", "description": "Staff member display name" },
+        "leaveType": {
+          "type": "string",
+          "enum": ["CL", "LAP", "LHAP", "SPECIAL", "TRAINING"],
+          "description": "Leave category (CL, LAP, LHAP, Special Leave, Technical Training)"
+        },
+        "startDate": { "type": "string", "description": "Inclusive leave start date YYYY-MM-DD" },
+        "endDate": { "type": "string", "description": "Inclusive leave end date YYYY-MM-DD" },
+        "status": {
+          "type": "string",
+          "enum": ["APPROVED", "PENDING", "REJECTED", "CANCELLED"],
+          "description": "Approval status; APPROVED excludes staff from shift availability"
+        },
+        "appliedByUid": { "type": "string", "description": "UID of applicant or supervisor" },
+        "appliedByName": { "type": "string", "description": "Display name of applicant" },
+        "forwardedToStaffId": { "type": "string", "description": "Target SSE supervisor StaffMember ID" },
+        "forwardedToName": { "type": "string", "description": "Target SSE supervisor name" },
+        "reviewedByName": { "type": "string", "description": "Approving/rejecting supervisor name" },
+        "notes": { "type": "string", "description": "Optional remarks" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update" }
+      },
+      "required": ["userId", "staffId", "staffName", "leaveType", "startDate", "endDate", "notes", "createdAt", "updatedAt"]
+    },
+    "EmergencyOverrideLog": {
+      "title": "EmergencyOverrideLog",
+      "description": "Shared audit log of manual emergency shift overrides",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Depot workspace ID (ppio_main)" },
+        "date": { "type": "string", "description": "ISO local date YYYY-MM-DD" },
+        "shiftType": { "type": "string", "enum": ["SHIFT_06_14", "SHIFT_14_22", "SHIFT_22_06", "SHIFT_08_17"] },
+        "dutyArea": { "type": "string", "enum": ["SHED", "STATION_SC", "STATION_UR", "STATION_MED"] },
+        "staffId": { "type": "string" },
+        "staffName": { "type": "string" },
+        "conflictSummary": { "type": "string" },
+        "reason": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "date", "shiftType", "dutyArea", "staffId", "staffName", "conflictSummary", "reason", "createdAt", "updatedAt"]
+    },
+    "DepotUserProfile": {
+      "title": "DepotUserProfile",
+      "description": "User role assignment controlled by Admin (Vinod Chinthawar)",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "username": { "type": "string", "description": "Optional short depot handle" },
+        "email": { "type": "string", "description": "User email address (PII restricted to owner/Admin)" },
+        "displayName": { "type": "string", "description": "User display name" },
+        "role": {
+          "type": "string",
+          "enum": ["ADMIN", "SUPERVISOR", "SSE", "JE", "SHIFT_INCHARGE", "STOREMATE", "TECHNICIAN"],
+          "description": "Assigned depot role"
+        },
+        "staffId": { "type": "string", "description": "Optional linked StaffMember ID" },
+        "phoneNumber": { "type": "string", "description": "Primary phone number entered during registration" },
+        "secondaryPhoneNumber": { "type": "string", "description": "Optional secondary phone number entered during registration" },
+        "registered": { "type": "boolean", "description": "True once the user has completed online account registration" },
+        "updatedByUid": { "type": "string", "description": "Admin UID who last updated role" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "role", "staffId", "updatedByUid", "createdAt", "updatedAt"]
+    },
+    "UsernameClaim": {
+      "title": "UsernameClaim",
+      "description": "Global online username reservation keyed by lowercase username to prevent duplicates",
+      "type": "object",
+      "properties": {
+        "username": { "type": "string", "description": "Lowercase unique username matching document ID" },
+        "uid": { "type": "string", "description": "Owner Firebase Auth UID" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["username", "uid", "createdAt", "updatedAt"]
+    },
+    "UserCredential": {
+      "title": "UserCredential",
+      "description": "Owner-only salted PBKDF2-HMAC-SHA256 password hash used for online username/password login synced with Gmail",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Owner Firebase Auth UID matching document ID" },
+        "username": { "type": "string", "description": "Lowercase registered username" },
+        "email": { "type": "string", "description": "Linked Gmail address" },
+        "passwordSalt": { "type": "string", "description": "Base64-encoded random salt" },
+        "passwordHash": { "type": "string", "description": "Base64-encoded PBKDF2-HMAC-SHA256 derived key" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "username", "email", "passwordSalt", "passwordHash", "createdAt", "updatedAt"]
+    },
+    "RoleInvite": {
+      "title": "RoleInvite",
+      "description": "Admin-created role pre-assignment keyed by lowercase Google email so users automatically receive their role when signing in on another phone",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "description": "Lowercase invited Google email matching document ID" },
+        "username": { "type": "string", "description": "Optional short depot handle" },
+        "displayName": { "type": "string", "description": "User display name" },
+        "role": {
+          "type": "string",
+          "enum": ["ADMIN", "SUPERVISOR", "SSE", "JE", "SHIFT_INCHARGE", "STOREMATE", "TECHNICIAN"],
+          "description": "Pre-assigned depot role"
+        },
+        "staffId": { "type": "string", "description": "Optional linked StaffMember ID" },
+        "updatedByUid": { "type": "string", "description": "Admin UID who created or updated the invite" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "displayName", "role", "staffId", "updatedByUid", "createdAt", "updatedAt"]
+    },
+    "DepotSettings": {
+      "title": "DepotSettings",
+      "description": "Admin-managed shared depot settings such as Technician share options visibility",
+      "type": "object",
+      "properties": {
+        "allowTechnicianShare": { "type": "boolean", "description": "Whether Technicians can see Share WhatsApp and PDF options" },
+        "showShunterForTechnicians": { "type": "boolean", "description": "Whether Shunter slot is visible to Technicians in Duties" },
+        "includeShunterInExport": { "type": "boolean", "description": "Whether Shunter slot is included in WhatsApp and PDF exports" },
+        "importantContactsInitialized": { "type": "boolean", "description": "True once Admin has seeded the default Important Phone Numbers so deleted defaults never re-appear" },
+        "rakesInitialized": { "type": "boolean", "description": "True once default EMU/MEMU/Vande Bharat rake formations have been seeded so deleted defaults never re-appear" },
+        "rakesSchemaVersion": { "type": "integer", "description": "Schema revision for seeded coach role formations (v2 = Conv EMU MC/TC/TC and MEMU DMC/TC1/TC2/TC3)" },
+        "roleMenuAccess": { "type": "object", "description": "Admin-managed per-role menu access matrix mapping role -> menu -> NONE | READ_ONLY | EDIT_WITH_APPROVAL | FULL_CONTROL" },
+        "updatedByUid": { "type": "string", "description": "Admin UID who last changed the setting" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["allowTechnicianShare", "updatedByUid", "createdAt", "updatedAt"]
+    },
+    "StaffLeaveAccount": {
+      "title": "StaffLeaveAccount",
+      "description": "Per-staff carry-forward LAP/LHAP opening balance, one-time Technician self-update flag, and Supervisor/Admin LAP correction approval state",
+      "type": "object",
+      "properties": {
+        "staffId": { "type": "string", "description": "StaffMember document ID" },
+        "staffName": { "type": "string", "description": "Staff member display name" },
+        "baseYear": { "type": "integer", "description": "Reference calendar year for opening balances" },
+        "lapOpeningBalance": { "type": "integer", "description": "Jan 1 LAP opening balance for baseYear" },
+        "lhapOpeningBalance": { "type": "integer", "description": "Jan 1 LHAP opening balance for baseYear" },
+        "lapSelfUpdated": { "type": "boolean", "description": "True once staff member has used their one-time direct LAP & LHAP update" },
+        "pendingLapBalance": { "type": "integer", "description": "Requested remaining LAP days awaiting Supervisor/Admin approval" },
+        "pendingLhapBalance": { "type": "integer", "description": "Requested remaining LHAP days awaiting Supervisor/Admin approval" },
+        "pendingLapYear": { "type": "integer", "description": "Year for pending leave balance correction" },
+        "pendingLapReason": { "type": "string", "description": "Reason for leave balance correction" },
+        "pendingLapStatus": {
+          "type": "string",
+          "enum": ["NONE", "PENDING", "APPROVED", "REJECTED"],
+          "description": "Approval state of leave balance correction request"
+        },
+        "pendingLapRequestedByUid": { "type": "string", "description": "Requesting user UID" },
+        "pendingLapReviewedByName": { "type": "string", "description": "Supervisor/Admin who approved or rejected correction" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["staffId", "staffName", "baseYear", "lapOpeningBalance", "lhapOpeningBalance", "lapSelfUpdated", "pendingLapBalance", "pendingLapYear", "pendingLapReason", "pendingLapStatus", "pendingLapRequestedByUid", "pendingLapReviewedByName", "createdAt", "updatedAt"]
+    },
+    "DutyPermissionRecord": {
+      "title": "DutyPermissionRecord",
+      "description": "Supervisor, Admin, and ShiftIncharge duty relief permission specifying relief hours granted to a staff member",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Depot workspace ID (ppio_main)" },
+        "staffId": { "type": "string", "description": "StaffMember document ID" },
+        "staffName": { "type": "string", "description": "Staff member display name" },
+        "date": { "type": "string", "description": "ISO local date YYYY-MM-DD" },
+        "shiftType": {
+          "type": "string",
+          "enum": ["SHIFT_06_14", "SHIFT_14_22", "SHIFT_22_06", "SHIFT_08_17"]
+        },
+        "hours": { "type": "number", "description": "Number of duty-relief hours granted (0.5..12)" },
+        "reliefType": {
+          "type": "string",
+          "enum": ["EARLY_RELIEF", "LATE_REPORTING", "MID_SHIFT"]
+        },
+        "reason": { "type": "string", "description": "Optional remarks or reason for permission" },
+        "grantedByUid": { "type": "string", "description": "ShiftIncharge, Supervisor, or Admin UID" },
+        "grantedByName": { "type": "string", "description": "ShiftIncharge, Supervisor, or Admin display name" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "staffId", "staffName", "date", "shiftType", "hours", "reliefType", "reason", "grantedByUid", "grantedByName", "createdAt", "updatedAt"]
+    },
+    "ImportantContact": {
+      "title": "ImportantContact",
+      "description": "Important depot control & station phone number visible to Shift Incharge, Supervisor, and Admin; managed exclusively by Admin",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Depot workspace ID (ppio_main)" },
+        "label": { "type": "string", "description": "Control room or station desk label" },
+        "phoneNumber": { "type": "string", "description": "Contact phone number" },
+        "category": { "type": "string", "description": "Operational category such as Control, Signal / RRI, Station Master" },
+        "sortOrder": { "type": "integer", "description": "Display ordering index" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "label", "phoneNumber", "category", "sortOrder", "createdAt", "updatedAt"]
+    },
+    "RakeFormation": {
+      "title": "RakeFormation",
+      "description": "EMU, MEMU, Spare Unit, or Vande Bharat rake formation with ordered coach compositions",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Depot workspace ID (ppio_main)" },
+        "rakeName": { "type": "string", "description": "Rake identifier such as 3-Ph EMU Rake 1 or Vande Bharat R-83" },
+        "category": {
+          "type": "string",
+          "enum": ["EMU_3PHASE_12CAR", "EMU_CONV_9CAR", "MEMU_3PHASE_12CAR", "MEMU_BHEL", "VANDE_BHARAT", "SPARE_UNIT"],
+          "description": "Rake traction and formation family"
+        },
+        "make": { "type": "string", "description": "Optional manufacturer make such as ICF or RCF" },
+        "tcasFitted": { "type": "boolean", "description": "Whether TCAS / Kavach is fitted on the rake" },
+        "startEnd": { "type": "string", "description": "Leading end orientation label such as KZJ or SC" },
+        "finishEnd": { "type": "string", "description": "Trailing end orientation label such as SC or KZJ" },
+        "remarks": { "type": "string", "description": "Optional operational remarks such as coach swaps or BT Rake" },
+        "sortOrder": { "type": "integer", "description": "Display ordering index" },
+        "coaches": { "type": "array", "description": "Ordered list of 1..24 coach objects with position, coachNumber, coachType, altNumber, endTag" },
+        "updatedByUid": { "type": "string", "description": "UID of last editor" },
+        "updatedByName": { "type": "string", "description": "Display name of last editor" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "rakeName", "category", "make", "tcasFitted", "startEnd", "finishEnd", "remarks", "sortOrder", "coaches", "updatedByUid", "updatedByName", "createdAt", "updatedAt"]
+    },
+    "AppReleaseConfig": {
+      "title": "AppReleaseConfig",
+      "description": "Admin-published OTA app release metadata pointing to a signed GitHub Releases HTTPS APK link",
+      "type": "object",
+      "properties": {
+        "latestVersionCode": { "type": "integer", "description": "Latest published Android versionCode (0 when paused/unset)" },
+        "latestVersionName": { "type": "string", "description": "Human-readable version name such as 1.1.0" },
+        "minSupportedVersionCode": { "type": "integer", "description": "Devices below this versionCode must update before continuing" },
+        "mandatory": { "type": "boolean", "description": "When true, forces all older versions to update immediately" },
+        "downloadUrl": { "type": "string", "description": "Verified https:// GitHub Releases APK download URL" },
+        "releaseNotes": { "type": "string", "description": "Changelog / What's New summary for depot staff" },
+        "sha256Checksum": { "type": "string", "description": "Optional 64-char hex SHA-256 checksum for verification" },
+        "publishedByUid": { "type": "string", "description": "Admin UID who published the release" },
+        "publishedByName": { "type": "string", "description": "Admin display name who published the release" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["latestVersionCode", "latestVersionName", "minSupportedVersionCode", "mandatory", "downloadUrl", "releaseNotes", "sha256Checksum", "publishedByUid", "publishedByName", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/depots/{depotId}/staff/{staffId}": {
+      "schema": { "$ref": "#/entities/StaffMember" },
+      "description": "Shared PPIO depot staff roster visible to all depot users"
+    },
+    "/depots/{depotId}/assignments/{assignmentId}": {
+      "schema": { "$ref": "#/entities/ShiftSlotAssignment" },
+      "description": "Shared Supervisor-approved daily shift assignments visible to everyone"
+    },
+    "/depots/{depotId}/dutyDrafts/{draftId}": {
+      "schema": { "$ref": "#/entities/DutyApprovalRequest" },
+      "description": "Storemate shift duty drafts awaiting Supervisor approval"
+    },
+    "/depots/{depotId}/dutyLocks/{dutyDate}": {
+      "schema": { "$ref": "#/entities/DutyDateLock" },
+      "description": "Per-date approval lock preventing post-approval Storemate alterations"
+    },
+    "/depots/{depotId}/leaves/{leaveId}": {
+      "schema": { "$ref": "#/entities/LeaveRecord" },
+      "description": "Shared leave applications and Supervisor approvals"
+    },
+    "/depots/{depotId}/overrides/{overrideId}": {
+      "schema": { "$ref": "#/entities/EmergencyOverrideLog" },
+      "description": "Shared emergency manual override audit logs"
+    },
+    "/depots/{depotId}/userRoles/{targetUid}": {
+      "schema": { "$ref": "#/entities/DepotUserProfile" },
+      "description": "Admin-managed user role and registration profile directory"
+    },
+    "/depots/{depotId}/usernames/{usernameKey}": {
+      "schema": { "$ref": "#/entities/UsernameClaim" },
+      "description": "Unique lowercase username claims preventing duplicate registrations"
+    },
+    "/depots/{depotId}/userCredentials/{targetUid}": {
+      "schema": { "$ref": "#/entities/UserCredential" },
+      "description": "Owner-only salted PBKDF2 password hashes for online username/password login synced with Gmail"
+    },
+    "/depots/{depotId}/roleInvites/{emailKey}": {
+      "schema": { "$ref": "#/entities/RoleInvite" },
+      "description": "Admin-managed Google email role pre-assignments claimed automatically on cross-device Google Sign-In"
+    },
+    "/depots/{depotId}/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/DepotSettings" },
+      "description": "Shared depot feature toggles managed by Admin"
+    },
+    "/depots/{depotId}/leaveAccounts/{staffId}": {
+      "schema": { "$ref": "#/entities/StaffLeaveAccount" },
+      "description": "Staff LAP/LHAP carry-forward balances and Technician one-time update / Supervisor approval state"
+    },
+    "/depots/{depotId}/dutyPermissions/{permissionId}": {
+      "schema": { "$ref": "#/entities/DutyPermissionRecord" },
+      "description": "ShiftIncharge, Supervisor, and Admin duty relief permissions tracking hours relieved from duty"
+    },
+    "/depots/{depotId}/importantContacts/{contactId}": {
+      "schema": { "$ref": "#/entities/ImportantContact" },
+      "description": "Important depot phone numbers visible to ShiftIncharge, Supervisor, and Admin, and added/removed exclusively by Admin"
+    },
+    "/depots/{depotId}/rakes/{rakeId}": {
+      "schema": { "$ref": "#/entities/RakeFormation" },
+      "description": "Shared EMU, MEMU, Spare Unit, and Vande Bharat rake formations viewable by all signed-in depot staff and managed by Admin, Supervisor, and ShiftIncharge"
+    },
+    "/depots/{depotId}/appRelease/{releaseId}": {
+      "schema": { "$ref": "#/entities/AppReleaseConfig" },
+      "description": "Admin-managed live OTA app release config (latest) readable by all signed-in depot users"
+    }
+  }
+}
