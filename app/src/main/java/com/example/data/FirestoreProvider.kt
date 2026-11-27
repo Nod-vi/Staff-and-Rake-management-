@@ -2,7 +2,6 @@ package com.example.data
 
 import android.content.Context
 import android.util.Log
-import com.example.R
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreSettings
 import com.google.firebase.firestore.PersistentCacheSettings
@@ -26,7 +25,15 @@ object FirestoreProvider {
     return synchronized(this) {
       instance?.let { return@synchronized it }
       val appContext = context.applicationContext
-      val databaseId = appContext.getString(R.string.firestore_database_id)
+      val resId = appContext.resources.getIdentifier(
+        "firestore_database_id",
+        "string",
+        appContext.packageName
+      )
+      val databaseId = if (resId != 0) appContext.getString(resId).trim() else ""
+      check(databaseId.isNotBlank()) {
+        "Firebase configuration missing: firestore_database_id resource not found."
+      }
       val db = FirebaseFirestore.getInstance(databaseId)
       applyOfflinePersistenceSettings(db)
       instance = db
