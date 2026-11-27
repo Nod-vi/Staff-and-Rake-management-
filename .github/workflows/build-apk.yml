@@ -1,0 +1,175 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Publish APK to GitHub Releases for OTA updates"
+        required: true
+        type: boolean
+        default: true
+      release_notes:
+        description: "Short release notes shown to users (optional)"
+        required: false
+        type: string
+        default: ""
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-apk:
+    name: Build & Package APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.3.1
+
+      - name: Accept Android SDK licenses
+        run: |
+          SDK_MANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          if [ -x "${SDK_MANAGER}" ]; then
+            yes | "${SDK_MANAGER}" --licenses > /dev/null 2>&1 || true
+          fi
+
+      - name: Restore project signing keystore
+        run: |
+          if [ ! -f debug.keystore ] && [ -f debug.keystore.base64 ]; then
+            tr -d '\r\n' < debug.keystore.base64 | base64 -d > debug.keystore
+          fi
+          if [ ! -f debug.keystore ]; then
+            echo "::error::debug.keystore could not be restored from debug.keystore.base64"
+            exit 1
+          fi
+
+      - name: Extract app version metadata
+        id: version
+        run: |
+          VERSION_CODE=$(grep -E '^[[:space:]]*versionCode[[:space:]]*=' app/build.gradle.kts | head -n 1 | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/')
+          VERSION_NAME=$(grep -E '^[[:space:]]*versionName[[:space:]]*=' app/build.gradle.kts | head -n 1 | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/')
+          VERSION_CODE="${VERSION_CODE:-1}"
+          VERSION_NAME="${VERSION_NAME:-1.0}"
+          TAG_NAME="v${VERSION_NAME}-b${VERSION_CODE}"
+          APK_NAME="ppio-roster-v${VERSION_NAME}-b${VERSION_CODE}.apk"
+          echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "apk_name=${APK_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Build APK
+        run: gradle :app:assembleDebug --no-daemon
+
+      - name: Prepare APK and compute SHA-256
+        id: package
+        env:
+          APK_NAME: ${{ steps.version.outputs.apk_name }}
+        run: |
+          SRC_APK="app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -f "${SRC_APK}" ]; then
+            echo "::error::Expected APK not found at ${SRC_APK}"
+            exit 1
+          fi
+          mkdir -p dist
+          OUT_APK="dist/${APK_NAME}"
+          cp "${SRC_APK}" "${OUT_APK}"
+          SHA256=$(sha256sum "${OUT_APK}" | awk '{print $1}')
+          echo "apk_path=${OUT_APK}" >> "$GITHUB_OUTPUT"
+          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.apk_name }}
+          path: ${{ steps.package.outputs.apk_path }}
+          retention-days: 30
+
+      - name: Publish GitHub Release for OTA updates
+        if: >-
+          (github.event_name == 'workflow_dispatch' && inputs.publish_release) ||
+          startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ steps.version.outputs.tag_name }}
+          VERSION_NAME: ${{ steps.version.outputs.version_name }}
+          VERSION_CODE: ${{ steps.version.outputs.version_code }}
+          APK_PATH: ${{ steps.package.outputs.apk_path }}
+          APK_NAME: ${{ steps.version.outputs.apk_name }}
+          SHA256: ${{ steps.package.outputs.sha256 }}
+          CUSTOM_NOTES: ${{ inputs.release_notes }}
+          REPO: ${{ github.repository }}
+        run: |
+          DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${TAG_NAME}/${APK_NAME}"
+          {
+            echo "## PPIO Roster v${VERSION_NAME} (Build ${VERSION_CODE})"
+            echo ""
+            if [ -n "${CUSTOM_NOTES}" ]; then
+              echo "${CUSTOM_NOTES}"
+              echo ""
+            fi
+            echo "### Admin OTA Update Details"
+            echo "- **Version Name:** \`${VERSION_NAME}\`"
+            echo "- **Version Code:** \`${VERSION_CODE}\`"
+            echo "- **Direct APK URL:** \`${DOWNLOAD_URL}\`"
+            echo "- **SHA-256:** \`${SHA256}\`"
+          } > release_notes.md
+
+          if gh release view "${TAG_NAME}" > /dev/null 2>&1; then
+            gh release upload "${TAG_NAME}" "${APK_PATH}" --clobber
+            gh release edit "${TAG_NAME}" --notes-file release_notes.md
+          else
+            gh release create "${TAG_NAME}" "${APK_PATH}" \
+              --target "${GITHUB_SHA}" \
+              --title "PPIO Roster v${VERSION_NAME} (Build ${VERSION_CODE})" \
+              --notes-file release_notes.md
+          fi
+
+      - name: Write OTA Summary
+        env:
+          TAG_NAME: ${{ steps.version.outputs.tag_name }}
+          VERSION_NAME: ${{ steps.version.outputs.version_name }}
+          VERSION_CODE: ${{ steps.version.outputs.version_code }}
+          APK_NAME: ${{ steps.version.outputs.apk_name }}
+          SHA256: ${{ steps.package.outputs.sha256 }}
+          REPO: ${{ github.repository }}
+          PUBLISHED: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_release) || startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${TAG_NAME}/${APK_NAME}"
+          {
+            echo "## Android APK Build Complete"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| **Version Name** | \`${VERSION_NAME}\` |"
+            echo "| **Version Code** | \`${VERSION_CODE}\` |"
+            echo "| **APK File** | \`${APK_NAME}\` |"
+            echo "| **SHA-256** | \`${SHA256}\` |"
+            if [ "${PUBLISHED}" = "true" ]; then
+              echo "| **Direct OTA URL** | \`${DOWNLOAD_URL}\` |"
+              echo ""
+              echo "Copy the **Direct OTA URL**, **Version Code**, **Version Name**, and **SHA-256** into **Admin → App Updates** inside the app."
+            else
+              echo ""
+              echo "APK uploaded as a build artifact above. Run this workflow manually with **Publish APK to GitHub Releases** checked to generate a direct OTA download link."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
